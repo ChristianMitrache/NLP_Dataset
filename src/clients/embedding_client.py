@@ -1,27 +1,21 @@
 """
-Logic for Embedding documents using an external Embedding Server
+Logic for Embedding documents using an external Embedding Server.
+Note this is compatible with both OpenAI embeddings as well as
+embedding servers hosted using TEI (From huggingface).
 """
 
-from typing import List, Dict, Optional
-from dataclasses import dataclass
+from typing import List, Optional
 import logging
 import asyncio
+from tqdm.asyncio import tqdm_asyncio
+
 from openai import AsyncOpenAI, OpenAIError, RateLimitError
 from src.config import settings
+from src.schemas.embedding_schemas import EmbeddingResponse
+from src.clients.model_cache import ModelCache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EmbeddingResponse:
-    """Container for embedding response data"""
-
-    text: str
-    embedding: List[float]
-    index: int
-    model: str
-    usage: Dict[str, int]
 
 
 class EmbeddingClient:
@@ -31,12 +25,13 @@ class EmbeddingClient:
 
     def __init__(
         self,
+        model_cache: ModelCache,
         max_concurrency: int,
-        model: str = "text-embedding-3-small",
+        model: Optional[str] = None,
         batch_size: int = 100,
         embedding_endpoint: Optional[str] = settings.EMBEDDING_API_KEY,
         api_key: Optional[str] = settings.EMBEDDING_API_KEY,
-        max_retries: int = 2,
+        max_retries: int = 3,
     ):
         if not api_key:
             logger.warning(
@@ -46,7 +41,7 @@ class EmbeddingClient:
             logger.warning(
                 "No embedding endpoint provided - defaulting to openai endpoint..."
             )
-
+        self.cache = model_cache
         self.max_retries = max_retries
         self.client = AsyncOpenAI(api_key=api_key, base_url=embedding_endpoint)
         self.model = model
@@ -54,9 +49,30 @@ class EmbeddingClient:
         self.batch_size = batch_size
         self.semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _make_request(
-        self, texts: List[str], start_index: int
-    ) -> List[EmbeddingResponse]:
+    def _post_process_requests(
+        self, texts: list[str], response
+    ) -> list[EmbeddingResponse]:
+        """
+        Post processing and adding each resulting EmbeddingResponse object to cache.
+        """
+        return_embeddings = [None] * len(texts)
+
+        for item in response.data:
+            text = texts[item.index]
+
+            emb_response = EmbeddingResponse(
+                text=text,
+                embedding=item.embedding,
+                usage=dict(response.usage),
+            )
+            self.cache.set(
+                user_input=texts, model_name=self.model, response_result=emb_response
+            )
+            return_embeddings[item.index] = emb_response
+
+        return return_embeddings
+
+    async def _make_request(self, texts: List[str]) -> List[EmbeddingResponse]:
         for attempt in range(self.max_retries):
             async with self.semaphore:
                 try:
@@ -67,30 +83,53 @@ class EmbeddingClient:
                     )
 
                     if response.status == 200:
-                        return [
-                            EmbeddingResponse(
-                                text=texts[item.index],
-                                embedding=item.embedding,
-                                index=start_index + item.index,
-                                model=response.model,
-                                usage=dict(response.usage),
-                            )
-                            for item in response.data
-                        ]
+                        return self._post_process_requests(texts, response)
+
                 except RateLimitError as e:
                     retry_after = int(e.response.headers.get("Retry-After", 5))
                     logger.warning("Rate limited. Waiting %s seconds...", retry_after)
                     if attempt == self.max_retries - 1:
-                        raise
+                        raise e
                     await asyncio.sleep(retry_after)
                     continue
 
                 except OpenAIError as e:
                     logger.error("OpenAI API error: %s", e)
                     if attempt == self.max_retries - 1:
-                        raise
+                        raise e
 
-    async def embed_batches(
+    async def embed_batches(self, texts: List[str], show_progress: bool = True):
+        """
+        Function to batch submit embeddings.
+
+        1. Split up input into cached and non-cached embeddings
+        2. Send off non-cached embeddings to asynchronous api calls.
+        3. Collect outputs from both in same order and return.
+        """
+        cached_output = {}
+        non_cached_input = []
+        non_cached_indices = {}
+        logger.info("Checking Embedding Cache...")
+        for text, i in enumerate(texts):
+            cache_result = self.cache.get(text, self.model)
+            if cache_result:
+                cached_output[i] = cache_result
+            else:
+                non_cached_input.append(text)
+                non_cached_indices[len(non_cached_input)] = i
+
+        embedding_outputs = await self._embed_batches_non_cached(
+            non_cached_input, show_progress=show_progress
+        )
+
+        return [
+            cached_output[i]
+            if i in cached_output
+            else embedding_outputs[non_cached_indices[i]]
+            for i in range(len(texts))
+        ]
+
+    async def _embed_batches_non_cached(
         self, texts: List[str], show_progress: bool = True
     ) -> List[EmbeddingResponse]:
         """
@@ -100,16 +139,18 @@ class EmbeddingClient:
             return []
 
         batches = [
-            (texts[i : i + self.batch_size], i)
+            texts[i : i + self.batch_size]
             for i in range(0, len(texts), self.batch_size)
         ]
 
-        tasks = [
-            self._make_request(batch_texts, start_index)
-            for batch_texts, start_index in batches
-        ]
+        tasks = [self._make_request(batch_texts) for batch_texts in batches]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await tqdm_asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+            desc="Embedding Batches...",
+            show_progress=show_progress,
+        )
 
         all_responses = []
         for i, result in enumerate(results):

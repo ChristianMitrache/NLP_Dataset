@@ -1,9 +1,11 @@
 """
 File For Fixtures
 """
+
 from unittest.mock import AsyncMock
 import pytest
-from src.clients.embedding_client import EmbeddingClient 
+from src.clients.embedding_client import EmbeddingClient
+
 
 @pytest.fixture
 def mock_embedding_client():
