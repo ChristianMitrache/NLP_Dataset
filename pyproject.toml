@@ -1,0 +1,17 @@
+[project]
+name = "nlp-dataset"
+version = "0.1.0"
+description = "Tools for standardizing natural language datasets"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.12.15",
+    "openai>=1.109.1",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.11.0",
+    "pytest>=8.4.2",
+    "ruff>=0.13.2",
+    "tqdm>=4.67.1",
+]
+[tool.setuptools.packages.find]
+where = [""]
