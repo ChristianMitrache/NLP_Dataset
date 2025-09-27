@@ -1,6 +1,11 @@
 # Extra stuff I don't want from uv
 *uv.lock
 *.python-version
+data/
+*cache.db*
+
+# Notebook I use to test things manually sometimes:
+test_notebook.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

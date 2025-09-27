@@ -24,7 +24,7 @@ class ModelCache:
     def __init__(
         self,
         cache_dir: str = "model_cache",
-        size_limit: int = 32**10,  # 32GB default
+        size_limit: int = 32 * 10**10,  # 32GB default
         eviction_policy: str = "least-recently-used",
     ):
         script_dir = Path(__file__).parent
@@ -42,7 +42,7 @@ class ModelCache:
         )
 
         logger.info("Initialized EmbeddingCache at %s", self.cache_dir)
-        logger.info(f"Cache size limit: {size_limit / 10**9:.1f} GB")
+        logger.info(f"Cache size limit: {size_limit / 10**10:.1f} GB")  # pylint: disable=w1203
         logger.info("Cache entries will persist permanently (no expiration)")
 
     def _generate_key(
@@ -61,7 +61,7 @@ class ModelCache:
             Unique cache key string
         """
         if isinstance(user_input, dict):
-            user_input_str = json.dumps(dict, sort_keys=True)
+            user_input_str = json.dumps(user_input, sort_keys=True)
         else:
             user_input_str = user_input
 
@@ -74,7 +74,7 @@ class ModelCache:
 
         # Create readable prefix
         prefix = model_name
-        return f"{prefix}:{key_hash[:16]}"
+        return f"{prefix}:{key_hash[:32]}"
 
     def get(
         self, user_input: Union[str, List[Dict[str, str]]], model_name: str
@@ -90,7 +90,8 @@ class ModelCache:
             Cached embedding result or None if not found
         """
         key = self._generate_key(user_input, model_name)
-        return self.cache.get(key)
+        with self.cache as cache:
+            return cache.get(key)
 
     def set(
         self,
@@ -107,7 +108,8 @@ class ModelCache:
             embedding_result: The embedding result to cache
         """
         key = self._generate_key(user_input, model_name)
-        self.cache.set(key, response_result)  # No expiration
+        with self.cache as cache:
+            cache.set(key, response_result)  # No expiration
 
     def clear(self) -> None:
         """Clear all cached entries"""

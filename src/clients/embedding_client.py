@@ -7,6 +7,7 @@ embedding servers hosted using TEI (From huggingface).
 from typing import List, Optional
 import logging
 import asyncio
+from itertools import chain
 from tqdm.asyncio import tqdm_asyncio
 
 from openai import AsyncOpenAI, OpenAIError, RateLimitError
@@ -16,6 +17,7 @@ from src.clients.model_cache import ModelCache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class EmbeddingClient:
@@ -25,14 +27,17 @@ class EmbeddingClient:
 
     def __init__(
         self,
-        model_cache: ModelCache,
         max_concurrency: int,
         model: Optional[str] = None,
+        model_cache: Optional[ModelCache] = None,
         batch_size: int = 100,
-        embedding_endpoint: Optional[str] = settings.EMBEDDING_API_KEY,
+        embedding_endpoint: Optional[str] = settings.EMBEDDING_ENDPOINT,
         api_key: Optional[str] = settings.EMBEDDING_API_KEY,
         max_retries: int = 3,
     ):
+        if model_cache and not isinstance(model_cache, ModelCache):
+            raise ValueError("model_cache parameter must be of type ModelCache")
+
         if not api_key:
             logger.warning(
                 "No API Key provided - defaulting to OPENAI_API_KEY env variable..."
@@ -55,6 +60,9 @@ class EmbeddingClient:
         """
         Post processing and adding each resulting EmbeddingResponse object to cache.
         """
+        if response is None:
+            return [EmbeddingResponse(text, None) for text in texts]
+
         return_embeddings = [None] * len(texts)
 
         for item in response.data:
@@ -63,11 +71,13 @@ class EmbeddingClient:
             emb_response = EmbeddingResponse(
                 text=text,
                 embedding=item.embedding,
-                usage=dict(response.usage),
             )
-            self.cache.set(
-                user_input=texts, model_name=self.model, response_result=emb_response
-            )
+            if self.cache:
+                self.cache.set(
+                    user_input=text,
+                    model_name=self.model,
+                    response_result=emb_response,
+                )
             return_embeddings[item.index] = emb_response
 
         return return_embeddings
@@ -82,21 +92,26 @@ class EmbeddingClient:
                         encoding_format="float",
                     )
 
-                    if response.status == 200:
-                        return self._post_process_requests(texts, response)
+                    return self._post_process_requests(texts, response)
 
                 except RateLimitError as e:
-                    retry_after = int(e.response.headers.get("Retry-After", 5))
-                    logger.warning("Rate limited. Waiting %s seconds...", retry_after)
-                    if attempt == self.max_retries - 1:
-                        raise e
-                    await asyncio.sleep(retry_after)
-                    continue
+                    if attempt < self.max_retries - 1:
+                        retry_after = int(e.response.headers.get("Retry-After", 5))
+                        logger.warning(
+                            "Rate limited. Waiting %s seconds...", retry_after
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
 
                 except OpenAIError as e:
-                    logger.error("OpenAI API error: %s", e)
-                    if attempt == self.max_retries - 1:
-                        raise e
+                    if attempt < self.max_retries - 1:
+                        logger.warning("OpenAI API error: %s", e)
+
+        logger.error(
+            "Max Retries exceeded on request \
+                    returing Empty EmbeddingResponse Objects"
+        )
+        return self._post_process_requests(texts, None)
 
     async def embed_batches(self, texts: List[str], show_progress: bool = True):
         """
@@ -106,17 +121,24 @@ class EmbeddingClient:
         2. Send off non-cached embeddings to asynchronous api calls.
         3. Collect outputs from both in same order and return.
         """
+        if self.cache is None:
+            return await self._embed_batches_non_cached(
+                texts, show_progress=show_progress
+            )
+
+        # If cache is supplied, keep track of cache misses and only send
+        # texts with cache misses to the embedding endpoint
         cached_output = {}
         non_cached_input = []
         non_cached_indices = {}
         logger.info("Checking Embedding Cache...")
-        for text, i in enumerate(texts):
+        for i, text in enumerate(texts):
             cache_result = self.cache.get(text, self.model)
             if cache_result:
                 cached_output[i] = cache_result
             else:
+                non_cached_indices[i] = len(non_cached_input)
                 non_cached_input.append(text)
-                non_cached_indices[len(non_cached_input)] = i
 
         embedding_outputs = await self._embed_batches_non_cached(
             non_cached_input, show_progress=show_progress
@@ -145,25 +167,12 @@ class EmbeddingClient:
 
         tasks = [self._make_request(batch_texts) for batch_texts in batches]
 
-        results = await tqdm_asyncio.gather(
-            *tasks,
-            return_exceptions=True,
-            desc="Embedding Batches...",
-            show_progress=show_progress,
-        )
-
-        all_responses = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error("Batch %s failed: %s", i, result)
-                raise result
-            all_responses.extend(result)
-
         if show_progress:
-            total_tokens = sum(
-                r.usage.get("total_tokens", 0) if not r is None else 0
-                for r in all_responses
+            results = await tqdm_asyncio.gather(
+                *tasks,
+                desc="Embedding Batches...",
             )
-            logger.info("Completed! Total tokens used: %s", total_tokens)
+        else:
+            results = await asyncio.gather(*tasks)
 
-        return all_responses
+        return list(chain(*results))
