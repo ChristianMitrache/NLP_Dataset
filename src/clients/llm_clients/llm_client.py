@@ -2,10 +2,9 @@
 Wrapper around pydantic ai enabling additional features
 """
 
-import json
 from typing import Optional, List, Dict, Union
 import asyncio
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from openai import AsyncOpenAI, APIError
 from src.clients.model_cache import ModelCache
 
@@ -86,14 +85,17 @@ class LLMCompletions:
         )
 
         # Combine cached and new responses
-        combined_responses = cached_response + new_responses
+        combined_responses = (
+            cached_response + new_responses if cached_response else new_responses
+        )
 
         # Update cache with the combined results
-        self.cache.set(
-            user_input=messages,
-            model_name=self.model_name,
-            response_result=combined_responses,
-        )
+        if self.cache:
+            self.cache.set(
+                user_input=messages,
+                model_name=self.model_name,
+                response_result=combined_responses,
+            )
 
         return combined_responses
 
@@ -130,12 +132,15 @@ class LLMCompletions:
             "response_format": response_format,
             **kwargs,
         }
-
         # Retry logic for API calls
-        responses = []
         for attempt in range(self.max_api_retries):
             try:
-                completion = await self.client.chat.completions.create(**api_params)
+                if response_format:
+                    completion = await self.client.chat.completions.parse(**api_params)
+                    result = [choice.message.parsed for choice in completion.choices]
+                else:
+                    completion = await self.client.chat.completions.create(**api_params)
+                    result = [choice.message.content for choice in completion.choices]
 
                 if completion.usage:
                     self._update_token_usage(completion)
@@ -146,29 +151,9 @@ class LLMCompletions:
                     raise
                 await asyncio.sleep(min(2 ** (attempt + 2), 60))
                 continue
-
-            try:
-                # Extract and validate responses
-                for choice in completion.choices:
-                    content = choice.message.content
-
-                    if response_format:
-                        # Parse and validate structured output
-                        parsed_data = json.loads(content)
-                        validated_response = response_format(**parsed_data)
-                        responses.append(validated_response.model_dump_json())
-                    else:
-                        responses.append(content)
-
-            except (json.JSONDecodeError, ValidationError) as format_error:
-                # Retry with exponential backoff for all other errors
-                if attempt == self.max_output_retries - 1:
-                    raise format_error
-                continue
-
             break  # Success, exit retry loop
 
-        return responses
+        return result
 
     def _update_token_usage(self, completion):
         """
