@@ -42,6 +42,8 @@ class EmbeddingClient:
             logger.warning(
                 "No API Key provided - defaulting to OPENAI_API_KEY env variable..."
             )
+            api_key = settings.OPENAI_API_KEY
+
         if not embedding_endpoint:
             logger.warning(
                 "No embedding endpoint provided - defaulting to openai endpoint..."

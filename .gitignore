@@ -3,6 +3,7 @@
 *.python-version
 data/
 *cache.db*
+test*
 
 # Notebook I use to test things manually sometimes:
 test_notebook.ipynb
