@@ -7,6 +7,7 @@ import asyncio
 from pydantic import BaseModel
 from openai import AsyncOpenAI, APIError
 from src.clients.model_cache import ModelCache
+from tqdm.asyncio import tqdm
 
 
 class FormattingException(Exception):
@@ -29,6 +30,7 @@ class LLMCompletions:
         model_cache: Optional[ModelCache] = None,
         max_api_retries: int = 3,
         max_output_retries: int = 3,
+        max_concurrency=50,
     ):
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.max_api_retries = max_api_retries
@@ -36,6 +38,7 @@ class LLMCompletions:
         self.token_usage = {}
         self.model_name = model_name
         self.max_output_retries = max_output_retries
+        self.semaphore = asyncio.Semaphore(max_concurrency)
 
     async def submit_request(
         self,
@@ -99,6 +102,52 @@ class LLMCompletions:
 
         return combined_responses
 
+    async def submit_requests(
+        self,
+        messages_list: List[List[Dict[str, str]]],
+        sample_size: int = 1,
+        response_format: Optional[type[BaseModel]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        progress_bar: bool = True,
+        **kwargs,
+    ) -> List[List[Union[str, type[BaseModel]]]]:
+        """
+        Submit requests for many conversations at once with optional progress bar.
+
+        Args:
+            messages_list: List of message lists to process
+            sample_size: Number of completions to generate per conversation
+            response_format: Optional Pydantic model for structured output
+            temperature: Sampling temperature (0-2)
+            max_tokens: Maximum tokens to generate
+            progress_bar: Whether to display a tqdm progress bar
+            **kwargs: Additional arguments to pass to the API
+
+        Returns:
+            List of response lists, one per input conversation
+        """
+        # Create tasks for all requests
+        tasks = [
+            self.submit_request(
+                messages=messages,
+                sample_size=sample_size,
+                response_format=response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            for messages in messages_list
+        ]
+
+        # Execute with or without progress bar
+        if progress_bar:
+            # Wrap gather with tqdm to show progress while preserving order
+            results = await tqdm.gather(*tasks, desc="Processing requests")
+            return results
+        else:
+            return await asyncio.gather(*tasks)
+
     async def _submit_no_cache_request(
         self,
         messages: List[Dict[str, str]],
@@ -110,6 +159,7 @@ class LLMCompletions:
     ) -> List[Union[str, type[BaseModel]]]:
         """
         Submit a request to the OpenAI API without caching.
+        Uses semaphore for concurrency control.
 
         Args:
             messages: List of message dicts [{"role": "user/assistant/system", "content": "..."}]
@@ -122,38 +172,47 @@ class LLMCompletions:
         Returns:
             List of generated responses
         """
-        # Prepare API call parameters
-        api_params = {
-            "model": self.model_name,
-            "messages": messages,
-            "n": sample_size,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": response_format,
-            **kwargs,
-        }
-        # Retry logic for API calls
-        for attempt in range(self.max_api_retries):
-            try:
-                if response_format:
-                    completion = await self.client.chat.completions.parse(**api_params)
-                    result = [choice.message.parsed for choice in completion.choices]
-                else:
-                    completion = await self.client.chat.completions.create(**api_params)
-                    result = [choice.message.content for choice in completion.choices]
+        async with self.semaphore:
+            # Prepare API call parameters
+            api_params = {
+                "model": self.model_name,
+                "messages": messages,
+                "n": sample_size,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": response_format,
+                **kwargs,
+            }
+            # Retry logic for API calls
+            for attempt in range(self.max_api_retries):
+                try:
+                    if response_format:
+                        completion = await self.client.chat.completions.parse(
+                            **api_params
+                        )
+                        result = [
+                            choice.message.parsed for choice in completion.choices
+                        ]
+                    else:
+                        completion = await self.client.chat.completions.create(
+                            **api_params
+                        )
+                        result = [
+                            choice.message.content for choice in completion.choices
+                        ]
 
-                if completion.usage:
-                    self._update_token_usage(completion)
+                    if completion.usage:
+                        self._update_token_usage(completion)
 
-            except APIError:
-                # Retry with exponential backoff for all other errors
-                if attempt == self.max_api_retries - 1:
-                    raise
-                await asyncio.sleep(min(2 ** (attempt + 2), 60))
-                continue
-            break  # Success, exit retry loop
+                except APIError:
+                    # Retry with exponential backoff for all other errors
+                    if attempt == self.max_api_retries - 1:
+                        raise
+                    await asyncio.sleep(min(2 ** (attempt + 2), 60))
+                    continue
+                break  # Success, exit retry loop
 
-        return result
+            return result
 
     def _update_token_usage(self, completion):
         """

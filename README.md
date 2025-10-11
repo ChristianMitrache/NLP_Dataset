@@ -1,0 +1,1 @@
+NLP Dataset uses LLMs to generate structured datasets with categorical, multi-categorical, and hierarchical (coming soon) data types. Define your schema, and let the LLM handle the rest—no complex configuration required.
