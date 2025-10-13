@@ -4,10 +4,10 @@ Wrapper around pydantic ai enabling additional features
 
 from typing import Optional, List, Dict, Union
 import asyncio
+from tqdm.asyncio import tqdm
 from pydantic import BaseModel
 from openai import AsyncOpenAI, APIError
 from src.clients.model_cache import ModelCache
-from tqdm.asyncio import tqdm
 
 
 class FormattingException(Exception):
@@ -29,16 +29,18 @@ class LLMCompletions:
         api_key: Optional[str] = None,
         model_cache: Optional[ModelCache] = None,
         max_api_retries: int = 3,
-        max_output_retries: int = 3,
         max_concurrency=50,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.max_api_retries = max_api_retries
         self.cache = model_cache
         self.token_usage = {}
         self.model_name = model_name
-        self.max_output_retries = max_output_retries
         self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
     async def submit_request(
         self,
@@ -178,8 +180,8 @@ class LLMCompletions:
                 "model": self.model_name,
                 "messages": messages,
                 "n": sample_size,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
+                "temperature": temperature if temperature else self.temperature,
+                "max_tokens": max_tokens if max_tokens else self.max_tokens,
                 "response_format": response_format,
                 **kwargs,
             }

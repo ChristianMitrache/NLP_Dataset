@@ -12,7 +12,6 @@ from tqdm.asyncio import tqdm_asyncio
 
 from openai import AsyncOpenAI, OpenAIError, RateLimitError
 from src.config import settings
-from src.schemas.embedding_schemas import EmbeddingResponse
 from src.clients.model_cache import ModelCache
 
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +21,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 class EmbeddingClient:
     """
-    Class for managing embedding batches of text in asynchronous manner.
+    Class for managing sending batches of text to an embedding endpoint in an asynchronous manner.
     """
 
     def __init__(
@@ -34,6 +33,7 @@ class EmbeddingClient:
         embedding_endpoint: Optional[str] = settings.EMBEDDING_ENDPOINT,
         api_key: Optional[str] = settings.EMBEDDING_API_KEY,
         max_retries: int = 3,
+        embedding_dim: Optional[int] = None,
     ):
         if model_cache and not isinstance(model_cache, ModelCache):
             raise ValueError("model_cache parameter must be of type ModelCache")
@@ -55,36 +55,42 @@ class EmbeddingClient:
         self.max_concurrent = max_concurrency
         self.batch_size = batch_size
         self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.embedding_dim = embedding_dim
 
-    def _post_process_requests(
-        self, texts: list[str], response
-    ) -> list[EmbeddingResponse]:
+    def get_embedding_dim(self) -> int:
         """
-        Post processing and adding each resulting EmbeddingResponse object to cache.
+        Make a dummy request in order to get embedding dimension if not
+        already stored.
+        """
+        if self.embedding_dim:
+            return self.embedding_dim
+        else:
+            self.embedding_dim = self.embed_batches(["filler"], show_progress=False)
+            return self.embedding_dim
+
+    def _post_process_requests(self, texts: list[str], response) -> list[float]:
+        """
+        Post processing and adding each resulting float object to cache.
         """
         if response is None:
-            return [EmbeddingResponse(text, None) for text in texts]
+            return [None for text in texts]
 
         return_embeddings = [None] * len(texts)
 
         for item in response.data:
             text = texts[item.index]
 
-            emb_response = EmbeddingResponse(
-                text=text,
-                embedding=item.embedding,
-            )
             if self.cache:
                 self.cache.set(
                     user_input=text,
                     model_name=self.model,
-                    response_result=emb_response,
+                    response_result=item.embedding,
                 )
-            return_embeddings[item.index] = emb_response
+            return_embeddings[item.index] = item.embedding
 
         return return_embeddings
 
-    async def _make_request(self, texts: List[str]) -> List[EmbeddingResponse]:
+    async def _make_request(self, texts: List[str]) -> List[float]:
         for attempt in range(self.max_retries):
             async with self.semaphore:
                 try:
@@ -111,7 +117,7 @@ class EmbeddingClient:
 
         logger.error(
             "Max Retries exceeded on request \
-                    returing Empty EmbeddingResponse Objects"
+                    returing Empty float Objects"
         )
         return self._post_process_requests(texts, None)
 
@@ -155,7 +161,7 @@ class EmbeddingClient:
 
     async def _embed_batches_non_cached(
         self, texts: List[str], show_progress: bool = True
-    ) -> List[EmbeddingResponse]:
+    ) -> List[float]:
         """
         Function to batch submit embeddings to a hosted client.
         """

@@ -1,1 +1,1 @@
-NLP Dataset uses LLMs to generate structured datasets with categorical, multi-categorical, and hierarchical (coming soon) data types. Define your schema, and let the LLM handle the rest—no complex configuration required.
+Lightweight LLM Utility to convert unstructured natural language datasets to categorical, multi-categorical, and hierarchical (coming soon) data types (containers). Specify the grouping type and define prompts on how you want your data grouped, and let NLP_Dataset handle the rest.

@@ -17,6 +17,10 @@ dependencies = [
     "pytest>=8.4.2",
     "ruff>=0.13.2",
     "tqdm>=4.67.1",
+    "unidecode>=1.4.0",
 ]
 [tool.setuptools.packages.find]
 where = [""]
+
+[tool.pylint.messages_control]
+extension-pkg-whitelist = ["faiss"]
